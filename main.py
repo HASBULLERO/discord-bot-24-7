@@ -4,9 +4,8 @@ import json
 import os
 import asyncio
 from datetime import datetime
-import aiofiles
 
-# Configuración del bot
+# Configuración del bot SIN funciones de voz para evitar el error audioop
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -14,13 +13,10 @@ intents.guilds = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Base de datos simple con archivos JSON
-ECONOMY_FILE = 'economy.json'
-TICKETS_FILE = 'tickets.json'
-CONFIG_FILE = 'config.json'
-
-# Configuración por defecto
-DEFAULT_CONFIG = {
+# Base de datos simple en memoria (para hosting gratuito)
+economy_data = {}
+tickets_data = {}
+config_data = {
     "welcome_channel": None,
     "ticket_category": None,
     "ticket_counter": 0,
@@ -28,67 +24,32 @@ DEFAULT_CONFIG = {
     "daily_amount": 100
 }
 
-async def load_json(filename, default=None):
-    """Cargar datos desde archivo JSON"""
-    try:
-        if os.path.exists(filename):
-            async with aiofiles.open(filename, 'r') as f:
-                content = await f.read()
-                return json.loads(content)
-        return default or {}
-    except:
-        return default or {}
-
-async def save_json(filename, data):
-    """Guardar datos en archivo JSON"""
-    try:
-        async with aiofiles.open(filename, 'w') as f:
-            await f.write(json.dumps(data, indent=2))
-    except Exception as e:
-        print(f"Error guardando {filename}: {e}")
-
 # =================
 # SISTEMA DE ECONOMIA
 # =================
 
-class EconomySystem:
-    def __init__(self):
-        self.data = {}
-    
-    async def load_data(self):
-        self.data = await load_json(ECONOMY_FILE, {})
-    
-    async def save_data(self):
-        await save_json(ECONOMY_FILE, self.data)
-    
-    def get_user_data(self, user_id):
-        user_id = str(user_id)
-        if user_id not in self.data:
-            self.data[user_id] = {
-                "balance": 0,
-                "bank": 0,
-                "last_daily": None,
-                "total_earned": 0
-            }
-        return self.data[user_id]
-    
-    async def add_money(self, user_id, amount, save=True):
-        user_data = self.get_user_data(user_id)
-        user_data["balance"] += amount
-        user_data["total_earned"] += amount
-        if save:
-            await self.save_data()
-    
-    async def remove_money(self, user_id, amount, save=True):
-        user_data = self.get_user_data(user_id)
-        if user_data["balance"] >= amount:
-            user_data["balance"] -= amount
-            if save:
-                await self.save_data()
-            return True
-        return False
+def get_user_data(user_id):
+    user_id = str(user_id)
+    if user_id not in economy_data:
+        economy_data[user_id] = {
+            "balance": 0,
+            "bank": 0,
+            "last_daily": None,
+            "total_earned": 0
+        }
+    return economy_data[user_id]
 
-economy = EconomySystem()
+def add_money(user_id, amount):
+    user_data = get_user_data(user_id)
+    user_data["balance"] += amount
+    user_data["total_earned"] += amount
+
+def remove_money(user_id, amount):
+    user_data = get_user_data(user_id)
+    if user_data["balance"] >= amount:
+        user_data["balance"] -= amount
+        return True
+    return False
 
 # =================
 # SISTEMA DE TICKETS
@@ -100,10 +61,7 @@ class TicketView(discord.ui.View):
     
     @discord.ui.button(label='🎫 Crear Ticket', style=discord.ButtonStyle.primary, custom_id='create_ticket')
     async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        config = await load_json(CONFIG_FILE, DEFAULT_CONFIG)
-        
         # Verificar si ya tiene un ticket abierto
-        tickets_data = await load_json(TICKETS_FILE, {})
         user_id = str(interaction.user.id)
         
         for ticket_id, ticket_info in tickets_data.items():
@@ -112,11 +70,11 @@ class TicketView(discord.ui.View):
                 return
         
         # Crear nuevo ticket
-        config['ticket_counter'] += 1
-        ticket_number = config['ticket_counter']
+        config_data['ticket_counter'] += 1
+        ticket_number = config_data['ticket_counter']
         
         guild = interaction.guild
-        category = discord.utils.get(guild.categories, id=config.get('ticket_category'))
+        category = discord.utils.get(guild.categories, id=config_data.get('ticket_category'))
         
         # Crear canal del ticket
         overwrites = {
@@ -125,7 +83,7 @@ class TicketView(discord.ui.View):
             guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
         }
         
-        # Agregar permisos para roles de staff (opcional)
+        # Agregar permisos para roles de staff
         for role in guild.roles:
             if any(perm in role.name.lower() for perm in ['admin', 'mod', 'staff', 'ayudante']):
                 overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
@@ -143,9 +101,6 @@ class TicketView(discord.ui.View):
             'status': 'open',
             'created_at': datetime.utcnow().isoformat()
         }
-        
-        await save_json(TICKETS_FILE, tickets_data)
-        await save_json(CONFIG_FILE, config)
         
         # Embed del ticket
         embed = discord.Embed(
@@ -175,14 +130,12 @@ class TicketCloseView(discord.ui.View):
             await interaction.response.send_message("❌ No tienes permisos para cerrar tickets.", ephemeral=True)
             return
         
-        tickets_data = await load_json(TICKETS_FILE, {})
         channel_id = str(interaction.channel.id)
         
         if channel_id in tickets_data:
             tickets_data[channel_id]['status'] = 'closed'
             tickets_data[channel_id]['closed_at'] = datetime.utcnow().isoformat()
             tickets_data[channel_id]['closed_by'] = str(interaction.user.id)
-            await save_json(TICKETS_FILE, tickets_data)
         
         embed = discord.Embed(
             title="🔒 Ticket Cerrado",
@@ -203,9 +156,6 @@ class TicketCloseView(discord.ui.View):
 async def on_ready():
     print(f'{bot.user} está conectado!')
     
-    # Cargar datos
-    await economy.load_data()
-    
     # Agregar vistas persistentes
     bot.add_view(TicketView())
     bot.add_view(TicketCloseView())
@@ -220,12 +170,10 @@ async def on_ready():
 @bot.event
 async def on_member_join(member):
     """Sistema de bienvenida"""
-    config = await load_json(CONFIG_FILE, DEFAULT_CONFIG)
-    
-    if not config.get('welcome_channel'):
+    if not config_data.get('welcome_channel'):
         return
     
-    channel = bot.get_channel(config['welcome_channel'])
+    channel = bot.get_channel(config_data['welcome_channel'])
     if not channel:
         return
     
@@ -238,7 +186,7 @@ async def on_member_join(member):
     )
     
     embed.set_thumbnail(url=member.display_avatar.url)
-    embed.set_image(url="https://media.giphy.com/media/Cmr1OMJ2FN0B2/giphy.gif")  # GIF de bienvenida
+    embed.set_image(url="https://media.giphy.com/media/Cmr1OMJ2FN0B2/giphy.gif")
     
     embed.add_field(
         name="📋 Información del Usuario",
@@ -257,7 +205,7 @@ async def on_member_join(member):
     await channel.send(embed=embed)
     
     # Dar dinero de bienvenida
-    await economy.add_money(member.id, 50)
+    add_money(member.id, 50)
 
 # =================
 # COMANDOS SLASH
@@ -266,7 +214,7 @@ async def on_member_join(member):
 @bot.tree.command(name="balance", description="Ver tu balance económico")
 async def balance(interaction: discord.Interaction, usuario: discord.Member = None):
     target = usuario or interaction.user
-    user_data = economy.get_user_data(target.id)
+    user_data = get_user_data(target.id)
     
     embed = discord.Embed(
         title=f"💰 Balance de {target.display_name}",
@@ -281,7 +229,7 @@ async def balance(interaction: discord.Interaction, usuario: discord.Member = No
 
 @bot.tree.command(name="daily", description="Reclamar tu recompensa diaria")
 async def daily(interaction: discord.Interaction):
-    user_data = economy.get_user_data(interaction.user.id)
+    user_data = get_user_data(interaction.user.id)
     now = datetime.utcnow()
     
     if user_data['last_daily']:
@@ -303,9 +251,8 @@ async def daily(interaction: discord.Interaction):
     
     # Dar recompensa
     amount = 100
-    await economy.add_money(interaction.user.id, amount)
+    add_money(interaction.user.id, amount)
     user_data['last_daily'] = now.isoformat()
-    await economy.save_data()
     
     embed = discord.Embed(
         title="🎁 ¡Recompensa diaria reclamada!",
@@ -331,7 +278,7 @@ async def work(interaction: discord.Interaction):
     job, (min_pay, max_pay) = random.choice(jobs)
     earnings = random.randint(min_pay, max_pay)
     
-    await economy.add_money(interaction.user.id, earnings)
+    add_money(interaction.user.id, earnings)
     
     embed = discord.Embed(
         title="💼 ¡Trabajo completado!",
@@ -351,11 +298,11 @@ async def pay(interaction: discord.Interaction, usuario: discord.Member, cantida
         await interaction.response.send_message("❌ La cantidad debe ser mayor a 0.", ephemeral=True)
         return
     
-    if not await economy.remove_money(interaction.user.id, cantidad):
+    if not remove_money(interaction.user.id, cantidad):
         await interaction.response.send_message("❌ No tienes suficiente dinero.", ephemeral=True)
         return
     
-    await economy.add_money(usuario.id, cantidad)
+    add_money(usuario.id, cantidad)
     
     embed = discord.Embed(
         title="💸 Transferencia exitosa",
@@ -372,9 +319,7 @@ async def setup_welcome(interaction: discord.Interaction, canal: discord.TextCha
         await interaction.response.send_message("❌ Necesitas permisos de administrador.", ephemeral=True)
         return
     
-    config = await load_json(CONFIG_FILE, DEFAULT_CONFIG)
-    config['welcome_channel'] = canal.id
-    await save_json(CONFIG_FILE, config)
+    config_data['welcome_channel'] = canal.id
     
     embed = discord.Embed(
         title="✅ Canal de bienvenida configurado",
@@ -391,9 +336,7 @@ async def setup_tickets(interaction: discord.Interaction, categoria: discord.Cat
         await interaction.response.send_message("❌ Necesitas permisos de administrador.", ephemeral=True)
         return
     
-    config = await load_json(CONFIG_FILE, DEFAULT_CONFIG)
-    config['ticket_category'] = categoria.id
-    await save_json(CONFIG_FILE, config)
+    config_data['ticket_category'] = categoria.id
     
     embed = discord.Embed(
         title="🎫 Sistema de Tickets",
@@ -409,17 +352,11 @@ async def setup_tickets(interaction: discord.Interaction, categoria: discord.Cat
     view = TicketView()
     await interaction.response.send_message(embed=embed, view=view)
 
-# =================
-# COMANDOS ADICIONALES
-# =================
-
 @bot.tree.command(name="leaderboard", description="Ver el ranking de dinero")
 async def leaderboard(interaction: discord.Interaction):
-    await economy.load_data()
-    
-    # Ordenar usuarios por balance total (mano + banco)
+    # Ordenar usuarios por balance total
     sorted_users = sorted(
-        economy.data.items(),
+        economy_data.items(),
         key=lambda x: x[1]['balance'] + x[1]['bank'],
         reverse=True
     )[:10]
